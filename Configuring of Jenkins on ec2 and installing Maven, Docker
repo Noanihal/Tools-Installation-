@@ -1,0 +1,173 @@
+1. Create the EC2 instance
+AMI: Ubuntu 22.04 LTS
+Instance type: c7i-flex.large (SonarQube likes RAM)
+Note: The instance type c7i-flex.large is eligible under the AWS credits-based free tier, so you will not incur charges as long as you remain within your credit balance.
+
+Root volume: 20 GB or more
+Security group (Jenkins VM)
+
+Allow SSH (22) from your IP.
+Allow Jenkins UI (8080) from your IP or CI admin network.
+
+
+2. Connect to the instance
+ssh -i <your-key>.pem ubuntu@<jenkins-ec2-public-ip>
+Note: Ensure your SSH private key is readable only by you. Run:
+
+chmod 600 ~/.ssh/<your-prvate-key>  
+chown $(whoami):$(whoami) ~/.ssh/<your-prvate-key>  
+Suggested hostname: jenkins This makes the server easy to identify in SSH sessions, monitoring dashboards, and DNS-based service discovery.
+
+# Set hostname and reload your shell
+sudo hostnamectl set-hostname jenkins
+exec bash
+Setting the correct timezone Set the machine timezone so logs and timestamps are consistent with your locality. I'll use Asia/Kolkata; pick the timezone that matches your location.
+
+# set timezone to Asia/Kolkata
+sudo timedatectl set-timezone Asia/Kolkata
+
+# verify
+timedatectl status
+# or
+date
+
+
+
+
+3. Install Java
+Jenkins current LTS works well with Java 17.
+
+# update package lists
+sudo apt update
+
+# install OpenJDK 17 includes the JRE (runtime) plus javac and dev tools needed by Maven
+sudo apt install -y openjdk-17-jdk
+
+# verify Java runtime and compiler are available
+java -version
+javac -version
+You should see Java 17 and a javac version in the output.
+
+
+
+
+
+4. Add Jenkins repository and install
+Reference: https://www.jenkins.io/doc/book/installing/linux/
+
+# add Jenkins GPG key to trusted keyring
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | sudo tee \
+  /usr/share/keyrings/jenkins-keyring.asc > /dev/null
+
+# add Jenkins APT repository (signed)
+echo deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
+  https://pkg.jenkins.io/debian-stable binary/ | \
+  sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
+
+# refresh package lists and install Jenkins
+sudo apt update
+sudo apt install -y jenkins
+Notes:
+
+openjdk-17-jdk provides javac required for Maven builds.
+You can keep fontconfig for compatibility with headless JVM operations.
+
+
+
+
+
+5. Start and enable Jenkins
+sudo systemctl enable jenkins
+sudo systemctl start jenkins
+sudo systemctl status jenkins
+Status should show active (running).
+
+Add a 7th step after the unlock section that installs Maven and explains why we need it. Keep it short, practical and copy-paste ready.
+
+
+
+
+
+
+6. Access Jenkins UI and unlock
+In your browser:
+
+http://<jenkins-ec2-public-ip>:8080
+Jenkins asks for the initial admin password. On the VM:
+
+sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+Paste this into the unlock screen.
+Select Install suggested plugins.
+Create your admin user.
+From here, this Jenkins will be your CI server to run mvn clean verify sonar:sonar later and talk to SonarQube on another VM.
+
+
+
+
+
+
+7. Install Maven (so Jenkins can build Maven projects)
+Why: Jenkins is just an automation server. To build a Maven project it must invoke mvn on the controller or agent that runs the job. Installing Maven on the VM ensures mvn is available system-wide for pipeline steps like mvn clean verify sonar:sonar.
+
+Install (Ubuntu 22.04, quick method):
+
+sudo apt update
+sudo apt install -y maven
+Verify:
+
+mvn -v
+# Example expected output:
+# Apache Maven 3.x.y
+# Java version: 17.x
+Notes / alternatives
+
+Apt provides a quick, system-wide Maven install which is fine for labs.
+For newer Maven versions or strict reproducibility, you can download the binary distribution from the Apache Maven site, extract to /opt/maven and add /opt/maven/bin to /etc/profile.d/maven.sh.
+In Jenkins you can also use Global Tool Configuration → Maven to let Jenkins auto-install Maven for jobs. If you prefer that, you still might install a system mvn for ad-hoc CLI use.
+Now your Jenkins VM is ready to run Maven builds and invoke the SonarQube scanner as part of the pipeline.
+
+
+
+
+
+8. Install Docker (so Jenkins can build and push container images)
+Why: Modern CI/CD pipelines often end with packaging applications into Docker images and pushing them to a container registry. Jenkins itself doesn’t include Docker, so we install it on the same VM (controller or agent) that will execute Docker build steps.
+
+Install Docker (Ubuntu 22.04):
+
+Installation Reference: https://docs.docker.com/engine/install/ubuntu/
+
+# 1. Uninstall older versions (if any)
+sudo apt remove docker docker-engine docker.io containerd runc
+
+# 2. Set up Docker's official repository
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# 3. Add the Docker repository to Apt sources
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 4. Install Docker Engine, CLI, containerd, and plugins
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+If successful, you’ll see a confirmation message from the Docker test container.
+
+Allow Jenkins user to run Docker without sudo: This adds the jenkins user to the docker group so Docker commands can run without elevated privileges.
+
+The jenkins user is the service account that runs Jenkins and owns its home and job workspaces. Keep it least-privilege, avoid human logins, and grant specific rights (for example, docker group) only when necessary.
+
+sudo usermod -aG docker jenkins
+sudo usermod -aG docker ubuntu  # add ubuntu to docker group so ubuntu can run docker without sudo
+sudo systemctl restart jenkins
+Log out and back in, or restart Jenkins, for the new group membership to apply.
+
+Verify installation:
+
+docker --version
